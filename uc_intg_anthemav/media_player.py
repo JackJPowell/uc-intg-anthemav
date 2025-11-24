@@ -49,21 +49,11 @@ class AnthemMediaPlayer(MediaPlayer):
         ]
         
         source_list = [
-            "HDMI 1",
-            "HDMI 2",
-            "HDMI 3",
-            "HDMI 4",
-            "HDMI 5",
-            "HDMI 6",
-            "HDMI 7",
-            "HDMI 8",
-            "Analog 1",
-            "Analog 2",
-            "Digital 1",
-            "Digital 2",
-            "USB",
-            "Network",
-            "ARC"
+            "HDMI 1", "HDMI 2", "HDMI 3", "HDMI 4",
+            "HDMI 5", "HDMI 6", "HDMI 7", "HDMI 8",
+            "Analog 1", "Analog 2",
+            "Digital 1", "Digital 2",
+            "USB", "Network", "ARC"
         ]
         
         attributes = {
@@ -193,8 +183,8 @@ class AnthemMediaPlayer(MediaPlayer):
                 return StatusCodes.BAD_REQUEST
             
             else:
-                _LOG.warning(f"Unsupported command for AVR: {cmd_id}")
-                return StatusCodes.NOT_IMPLEMENTED
+                _LOG.debug(f"Suppressing unsupported command: {cmd_id}")
+                return StatusCodes.OK
         
         except Exception as e:
             _LOG.error(f"Error executing command {cmd_id}: {e}")

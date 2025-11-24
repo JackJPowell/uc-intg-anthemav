@@ -35,7 +35,6 @@ class AnthemClient:
         self._listen_task: Optional[asyncio.Task] = None
         self._state_cache: Dict[str, Any] = {}
         self._zones_initialized = False
-        self._ready_event = asyncio.Event()
         
     async def connect(self) -> bool:
         async with self._lock:
@@ -60,16 +59,11 @@ class AnthemClient:
                 
                 await asyncio.sleep(0.1)
                 
+                _LOG.info(f"Listen task started for {self._device_config.name}")
+                
                 await self._send_command("ECH0")
                 await asyncio.sleep(0.05)
-                
-                await self._send_command("IDM?")
-                await asyncio.sleep(0.05)
-                
                 await self._send_command("Z1POW?")
-                await asyncio.sleep(0.05)
-                
-                self._ready_event.set()
                 
                 return True
                 
@@ -116,7 +110,7 @@ class AnthemClient:
             cmd_bytes = f"{command}\r".encode('ascii')
             self._writer.write(cmd_bytes)
             await self._writer.drain()
-            _LOG.debug(f"Sent command: {command}")
+            _LOG.info(f"Sent command: {command}")
             return True
         except Exception as e:
             _LOG.error(f"Error sending command {command}: {e}")
@@ -125,8 +119,6 @@ class AnthemClient:
     
     async def _listen(self) -> None:
         buffer = ""
-        
-        _LOG.info(f"Listen task started for {self._device_config.name}")
         
         while self._connected and self._reader:
             try:
@@ -147,7 +139,6 @@ class AnthemClient:
                     line = line.strip()
                     
                     if line:
-                        _LOG.info(f"Received from device: {line}")
                         await self._process_response(line)
                 
             except asyncio.TimeoutError:
@@ -160,7 +151,7 @@ class AnthemClient:
         _LOG.info(f"Listen task ended for {self._device_config.name}")
     
     async def _process_response(self, response: str) -> None:
-        _LOG.debug(f"Processing: {response}")
+        _LOG.info(f"Received: {response}")
         
         self._update_state_from_response(response)
         
@@ -200,33 +191,28 @@ class AnthemClient:
                 if "POW" in response:
                     power = "1" in response
                     self._state_cache[zone_key]["power"] = power
-                    _LOG.info(f"Zone {zone_num} power: {power}")
                 
                 elif "VOL" in response:
                     vol_match = re.search(r'VOL(-?\d+)', response)
                     if vol_match:
                         volume = int(vol_match.group(1))
                         self._state_cache[zone_key]["volume"] = volume
-                        _LOG.info(f"Zone {zone_num} volume: {volume}dB")
                 
                 elif "MUT" in response:
                     muted = "1" in response
                     self._state_cache[zone_key]["muted"] = muted
-                    _LOG.info(f"Zone {zone_num} muted: {muted}")
                 
                 elif "INP" in response:
                     inp_match = re.search(r'INP(\d+)', response)
                     if inp_match:
                         input_num = int(inp_match.group(1))
                         self._state_cache[zone_key]["input"] = input_num
-                        _LOG.info(f"Zone {zone_num} input: {input_num}")
                 
                 elif "SIP" in response:
                     inp_match = re.search(r'SIP"([^"]*)"', response)
                     if inp_match:
                         input_name = inp_match.group(1)
                         self._state_cache[zone_key]["input_name"] = input_name
-                        _LOG.info(f"Zone {zone_num} input name: {input_name}")
                 
                 elif "AIC" in response:
                     format_match = re.search(r'AIC"([^"]*)"', response)

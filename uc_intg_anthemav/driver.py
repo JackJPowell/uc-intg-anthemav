@@ -26,7 +26,7 @@ entities_ready: bool = False
 initialization_lock: asyncio.Lock = asyncio.Lock()
 setup_manager: AnthemSetup | None = None
 
-_LOG = logging.getLogger(__name__)
+_LOG = logging.getLogger(__main__)
 
 
 async def _initialize_integration():
@@ -69,8 +69,6 @@ async def _initialize_integration():
                 
                 clients[device_config.device_id] = client
                 
-                await asyncio.sleep(0.5)
-                
                 for zone_config in device_config.zones:
                     if not zone_config.enabled:
                         continue
@@ -85,8 +83,7 @@ async def _initialize_integration():
                     
                     await asyncio.sleep(0.3)
                     await media_player_entity.push_update()
-                
-                await asyncio.sleep(0.5)
+                    _LOG.info(f"Queried initial state for: {media_player_entity.id}")
                 
                 connected_devices += 1
                 _LOG.info(f"Successfully setup device: {device_config.name} with {len(device_config.zones)} zones")
