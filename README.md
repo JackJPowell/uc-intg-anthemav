@@ -127,7 +127,7 @@ services:
 
 **Docker Run:**
 ```bash
-docker run -d --name=uc-intg-anthemav --network host -v </local/path>:/data -e UC_CONFIG_HOME=/data -e UC_INTEGRATION_HTTP_PORT=9090 --restart unless-stopped ghcr.io/mase1981/uc-intg-anthemav:latest
+docker run -d --name uc-anthemav --restart unless-stopped --network host -v anthemav-config:/app/config -e UC_CONFIG_HOME=/app/config -e UC_INTEGRATION_INTERFACE=0.0.0.0 -e UC_INTEGRATION_HTTP_PORT=9090 -e PYTHONPATH=/app ghcr.io/mase1981/uc-intg-anthemav:latest
 ```
 
 ## Configuration
