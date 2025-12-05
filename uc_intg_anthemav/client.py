@@ -9,10 +9,14 @@ import asyncio
 import logging
 import re
 from typing import Any, Dict, Optional, Callable
+import errno
 
 from uc_intg_anthemav.config import DeviceConfig, ZoneConfig
 
 _LOG = logging.getLogger(__name__)
+
+NETWORK_RETRY_DELAY = 2.0
+MAX_NETWORK_RETRIES = 5
 
 
 class ConnectionError(Exception):
@@ -41,38 +45,60 @@ class AnthemClient:
             if self._connected:
                 return True
             
-            try:
-                _LOG.info(f"Connecting to {self._device_config.name} at {self._device_config.ip_address}:{self._device_config.port}")
-                
-                self._reader, self._writer = await asyncio.wait_for(
-                    asyncio.open_connection(
-                        self._device_config.ip_address,
-                        self._device_config.port
-                    ),
-                    timeout=self._device_config.timeout
-                )
-                
-                self._connected = True
-                _LOG.info(f"Connected to {self._device_config.name}")
-                
-                self._listen_task = asyncio.create_task(self._listen())
-                
-                await asyncio.sleep(0.1)
-                
-                _LOG.info(f"Listen task started for {self._device_config.name}")
-                
-                await self._send_command("ECH0")
-                await asyncio.sleep(0.05)
-                await self._send_command("Z1POW?")
-                
-                return True
-                
-            except asyncio.TimeoutError:
-                _LOG.error(f"Connection timeout to {self._device_config.name}")
-                return False
-            except Exception as e:
-                _LOG.error(f"Connection error to {self._device_config.name}: {e}")
-                return False
+            retry_count = 0
+            last_error = None
+            
+            while retry_count < MAX_NETWORK_RETRIES:
+                try:
+                    _LOG.info(f"Connecting to {self._device_config.name} at {self._device_config.ip_address}:{self._device_config.port} (attempt {retry_count + 1}/{MAX_NETWORK_RETRIES})")
+                    
+                    self._reader, self._writer = await asyncio.wait_for(
+                        asyncio.open_connection(
+                            self._device_config.ip_address,
+                            self._device_config.port
+                        ),
+                        timeout=self._device_config.timeout
+                    )
+                    
+                    self._connected = True
+                    _LOG.info(f"Connected to {self._device_config.name}")
+                    
+                    self._listen_task = asyncio.create_task(self._listen())
+                    
+                    await asyncio.sleep(0.1)
+                    
+                    _LOG.info(f"Listen task started for {self._device_config.name}")
+                    
+                    await self._send_command("ECH0")
+                    await asyncio.sleep(0.05)
+                    await self._send_command("Z1POW?")
+                    
+                    return True
+                    
+                except OSError as e:
+                    if e.errno == errno.ENETUNREACH:
+                        last_error = e
+                        retry_count += 1
+                        _LOG.warning(f"Network unreachable for {self._device_config.name}, retrying in {NETWORK_RETRY_DELAY}s (attempt {retry_count}/{MAX_NETWORK_RETRIES})")
+                        if retry_count < MAX_NETWORK_RETRIES:
+                            await asyncio.sleep(NETWORK_RETRY_DELAY)
+                            continue
+                        else:
+                            _LOG.error(f"Network still unreachable after {MAX_NETWORK_RETRIES} attempts")
+                            return False
+                    else:
+                        _LOG.error(f"OS error connecting to {self._device_config.name}: {e}")
+                        return False
+                        
+                except asyncio.TimeoutError:
+                    _LOG.error(f"Connection timeout to {self._device_config.name}")
+                    return False
+                    
+                except Exception as e:
+                    _LOG.error(f"Connection error to {self._device_config.name}: {e}")
+                    return False
+            
+            return False
     
     async def disconnect(self) -> None:
         async with self._lock:
