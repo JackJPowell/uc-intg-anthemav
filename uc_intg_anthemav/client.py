@@ -9,14 +9,10 @@ import asyncio
 import logging
 import re
 from typing import Any, Dict, Optional, Callable
-import errno
 
 from uc_intg_anthemav.config import DeviceConfig, ZoneConfig
 
 _LOG = logging.getLogger(__name__)
-
-NETWORK_RETRY_DELAY = 2.0
-MAX_NETWORK_RETRIES = 5
 
 
 class ConnectionError(Exception):
@@ -39,18 +35,17 @@ class AnthemClient:
         self._listen_task: Optional[asyncio.Task] = None
         self._state_cache: Dict[str, Any] = {}
         self._zones_initialized = False
+        self._input_names_discovered = False
+        self._pending_input_queries = set()
         
-    async def connect(self) -> bool:
+    async def connect(self, max_retries: int = 5, retry_delay: float = 2.0) -> bool:
         async with self._lock:
             if self._connected:
                 return True
             
-            retry_count = 0
-            last_error = None
-            
-            while retry_count < MAX_NETWORK_RETRIES:
+            for attempt in range(1, max_retries + 1):
                 try:
-                    _LOG.info(f"Connecting to {self._device_config.name} at {self._device_config.ip_address}:{self._device_config.port} (attempt {retry_count + 1}/{MAX_NETWORK_RETRIES})")
+                    _LOG.info(f"Connecting to {self._device_config.name} at {self._device_config.ip_address}:{self._device_config.port} (attempt {attempt}/{max_retries})")
                     
                     self._reader, self._writer = await asyncio.wait_for(
                         asyncio.open_connection(
@@ -65,37 +60,38 @@ class AnthemClient:
                     
                     self._listen_task = asyncio.create_task(self._listen())
                     
-                    await asyncio.sleep(0.2)
+                    await asyncio.sleep(0.1)
                     
                     _LOG.info(f"Listen task started for {self._device_config.name}")
                     
                     await self._send_command("ECH0")
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.05)
+                    
+                    await self._discover_input_names()
+                    
                     await self._send_command("Z1POW?")
                     
                     return True
                     
-                except OSError as e:
-                    if e.errno == errno.ENETUNREACH:
-                        last_error = e
-                        retry_count += 1
-                        _LOG.warning(f"Network unreachable for {self._device_config.name}, retrying in {NETWORK_RETRY_DELAY}s (attempt {retry_count}/{MAX_NETWORK_RETRIES})")
-                        if retry_count < MAX_NETWORK_RETRIES:
-                            await asyncio.sleep(NETWORK_RETRY_DELAY)
-                            continue
-                        else:
-                            _LOG.error(f"Network still unreachable after {MAX_NETWORK_RETRIES} attempts")
-                            return False
-                    else:
-                        _LOG.error(f"OS error connecting to {self._device_config.name}: {e}")
-                        return False
-                        
                 except asyncio.TimeoutError:
-                    _LOG.error(f"Connection timeout to {self._device_config.name}")
+                    _LOG.error(f"Connection timeout to {self._device_config.name} (attempt {attempt}/{max_retries})")
+                    if attempt < max_retries:
+                        await asyncio.sleep(retry_delay)
+                        continue
                     return False
-                    
-                except Exception as e:
+                except OSError as e:
+                    if e.errno in (113, 111, 10061):
+                        _LOG.error(f"Network error connecting to {self._device_config.name}: {e} (attempt {attempt}/{max_retries})")
+                        if attempt < max_retries:
+                            await asyncio.sleep(retry_delay)
+                            continue
                     _LOG.error(f"Connection error to {self._device_config.name}: {e}")
+                    return False
+                except Exception as e:
+                    _LOG.error(f"Unexpected connection error to {self._device_config.name}: {e}")
+                    if attempt < max_retries:
+                        await asyncio.sleep(retry_delay)
+                        continue
                     return False
             
             return False
@@ -143,6 +139,32 @@ class AnthemClient:
             self._connected = False
             return False
     
+    async def _discover_input_names(self) -> None:
+        _LOG.info(f"Discovering input names for {self._device_config.name}")
+        
+        if "input_names" not in self._state_cache:
+            self._state_cache["input_names"] = {}
+        
+        input_count = 15
+        
+        for input_num in range(1, input_count + 1):
+            self._pending_input_queries.add(input_num)
+            await self._send_command(f"ISN{input_num}?")
+            await asyncio.sleep(0.05)
+        
+        timeout = 3.0
+        start_time = asyncio.get_event_loop().time()
+        
+        while self._pending_input_queries and (asyncio.get_event_loop().time() - start_time) < timeout:
+            await asyncio.sleep(0.1)
+        
+        if self._pending_input_queries:
+            _LOG.warning(f"Input name discovery incomplete. Missing inputs: {self._pending_input_queries}")
+        else:
+            _LOG.info(f"Input name discovery completed for {self._device_config.name}")
+        
+        self._input_names_discovered = True
+    
     async def _listen(self) -> None:
         buffer = ""
         
@@ -158,17 +180,27 @@ class AnthemClient:
                     self._connected = False
                     break
                 
-                buffer += data.decode('ascii', errors='ignore')
+                try:
+                    decoded = data.decode('ascii', errors='ignore')
+                except Exception as e:
+                    _LOG.debug(f"Decode error: {e}")
+                    continue
                 
-                lines = buffer.splitlines(keepends=True)
+                buffer += decoded
                 
-                if lines and not lines[-1].endswith(('\r', '\n')):
-                    buffer = lines.pop()
-                else:
-                    buffer = ""
-                
-                for line in lines:
+                while '\r' in buffer or '\n' in buffer:
+                    if '\r' in buffer and '\n' in buffer:
+                        if buffer.index('\r') < buffer.index('\n'):
+                            line, buffer = buffer.split('\r', 1)
+                        else:
+                            line, buffer = buffer.split('\n', 1)
+                    elif '\r' in buffer:
+                        line, buffer = buffer.split('\r', 1)
+                    else:
+                        line, buffer = buffer.split('\n', 1)
+                    
                     line = line.strip()
+                    
                     if line:
                         await self._process_response(line)
                 
@@ -209,6 +241,21 @@ class AnthemClient:
         elif response.startswith("IDS"):
             software = response[3:].strip()
             self._state_cache["software_version"] = software
+        
+        elif response.startswith("ISN"):
+            match = re.match(r'ISN(\d+)"([^"]*)"', response)
+            if match:
+                input_num = int(match.group(1))
+                input_name = match.group(2).strip()
+                
+                if "input_names" not in self._state_cache:
+                    self._state_cache["input_names"] = {}
+                
+                self._state_cache["input_names"][input_num] = input_name if input_name else f"Input {input_num}"
+                _LOG.info(f"Discovered input {input_num}: {input_name}")
+                
+                if input_num in self._pending_input_queries:
+                    self._pending_input_queries.remove(input_num)
         
         elif response.startswith("Z"):
             zone_match = re.match(r'Z(\d+)', response)
@@ -288,9 +335,6 @@ class AnthemClient:
     async def query_input(self, zone: int = 1) -> bool:
         return await self._send_command(f"Z{zone}INP?")
     
-    async def query_input_name(self, zone: int = 1) -> bool:
-        return await self._send_command(f"Z{zone}SIP?")
-    
     async def query_model(self) -> bool:
         return await self._send_command("IDM?")
     
@@ -302,8 +346,6 @@ class AnthemClient:
         await self.query_mute(zone)
         await asyncio.sleep(0.1)
         await self.query_input(zone)
-        await asyncio.sleep(0.1)
-        await self.query_input_name(zone)
         return True
     
     def get_zone_state(self, zone: int) -> Dict[str, Any]:
@@ -316,6 +358,13 @@ class AnthemClient:
             zone_data = self._state_cache.get(zone_key, {})
             return zone_data.get(key)
         return self._state_cache.get(key)
+    
+    def get_input_names(self) -> Dict[int, str]:
+        return self._state_cache.get("input_names", {})
+    
+    def get_input_name(self, input_num: int) -> str:
+        input_names = self.get_input_names()
+        return input_names.get(input_num, f"Input {input_num}")
     
     @property
     def is_connected(self) -> bool:
