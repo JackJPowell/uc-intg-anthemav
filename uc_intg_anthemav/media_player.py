@@ -5,7 +5,6 @@ Anthem Media Player entity implementation.
 :license: MPL-2.0, see LICENSE for more details.
 """
 
-import asyncio
 import logging
 from typing import Any, Dict, Optional
 
@@ -49,13 +48,7 @@ class AnthemMediaPlayer(MediaPlayer):
             Features.SELECT_SOURCE
         ]
         
-        source_list = [
-            "HDMI 1", "HDMI 2", "HDMI 3", "HDMI 4",
-            "HDMI 5", "HDMI 6", "HDMI 7", "HDMI 8",
-            "Analog 1", "Analog 2",
-            "Digital 1", "Digital 2",
-            "USB", "Network", "ARC"
-        ]
+        source_list = self._client.get_input_list()
         
         attributes = {
             Attributes.STATE: States.UNAVAILABLE,
@@ -77,40 +70,20 @@ class AnthemMediaPlayer(MediaPlayer):
         
         self._client.set_update_callback(self._on_device_update)
         
-        asyncio.create_task(self._update_source_list())
-        
-    async def _update_source_list(self) -> None:
-        await asyncio.sleep(2.0)
-        
-        input_names = self._client.get_input_names()
-        
-        if not input_names:
-            _LOG.warning(f"No discovered input names available for {self.id}")
-            return
-        
-        source_list = []
-        for input_num in range(1, 16):
-            input_name = input_names.get(input_num)
-            if input_name:
-                source_list.append(input_name)
-        
-        if source_list:
-            _LOG.info(f"Updating source list with {len(source_list)} discovered inputs: {source_list}")
-            
-            updated_attrs = {Attributes.SOURCE_LIST: source_list}
-            self.attributes.update(updated_attrs)
-            
-            if self._api and self._api.configured_entities.contains(self.id):
-                self._api.configured_entities.update_attributes(
-                    self.id,
-                    updated_attrs
-                )
-        
     def _on_device_update(self, message: str) -> None:
         zone_state = self._client.get_zone_state(self._zone_config.zone_number)
         
         if zone_state:
             self._update_attributes_from_state(zone_state)
+        
+        source_list = self._client.get_input_list()
+        if self.attributes.get(Attributes.SOURCE_LIST) != source_list:
+            self.attributes[Attributes.SOURCE_LIST] = source_list
+            if self._api and self._api.configured_entities.contains(self.id):
+                self._api.configured_entities.update_attributes(
+                    self.id,
+                    {Attributes.SOURCE_LIST: source_list}
+                )
     
     def _update_attributes_from_state(self, zone_state: Dict[str, Any]) -> None:
         updated_attrs = {}
@@ -130,12 +103,11 @@ class AnthemMediaPlayer(MediaPlayer):
             if self.attributes.get(Attributes.MUTED) != zone_state["muted"]:
                 updated_attrs[Attributes.MUTED] = zone_state["muted"]
         
-        if "input" in zone_state:
-            input_num = zone_state["input"]
-            input_name = self._client.get_input_name(input_num)
-            if self.attributes.get(Attributes.SOURCE) != input_name:
-                updated_attrs[Attributes.SOURCE] = input_name
-                updated_attrs[Attributes.MEDIA_TITLE] = input_name
+        if "input_name" in zone_state:
+            if self.attributes.get(Attributes.SOURCE) != zone_state["input_name"]:
+                updated_attrs[Attributes.SOURCE] = zone_state["input_name"]
+                if zone_state["input_name"]:
+                    updated_attrs[Attributes.MEDIA_TITLE] = zone_state["input_name"]
         
         if "audio_format" in zone_state:
             if zone_state["audio_format"]:
@@ -157,25 +129,8 @@ class AnthemMediaPlayer(MediaPlayer):
     
     def _percentage_to_db(self, percentage: float) -> int:
         db_range = 90
-        db_value = int((percentage * db_range) - 90)
+        db_value = int((percentage * db_range / 100) - 90)
         return max(-90, min(0, db_value))
-    
-    def _get_input_number_from_name(self, source_name: str) -> Optional[int]:
-        input_names = self._client.get_input_names()
-        
-        for input_num, input_name in input_names.items():
-            if input_name == source_name:
-                return input_num
-        
-        fallback_map = {
-            "HDMI 1": 1, "HDMI 2": 2, "HDMI 3": 3, "HDMI 4": 4,
-            "HDMI 5": 5, "HDMI 6": 6, "HDMI 7": 7, "HDMI 8": 8,
-            "Analog 1": 9, "Analog 2": 10,
-            "Digital 1": 11, "Digital 2": 12,
-            "USB": 13, "Network": 14, "ARC": 15
-        }
-        
-        return fallback_map.get(source_name)
     
     async def handle_command(self, entity: MediaPlayer, cmd_id: str, params: Optional[Dict[str, Any]]) -> StatusCodes:
         _LOG.info(f"Received command {cmd_id} for {self.id}")
@@ -223,7 +178,7 @@ class AnthemMediaPlayer(MediaPlayer):
             elif cmd_id == Commands.SELECT_SOURCE:
                 if params and "source" in params:
                     source_name = params["source"]
-                    input_num = self._get_input_number_from_name(source_name)
+                    input_num = self._client.get_input_number_by_name(source_name)
                     if input_num is not None:
                         success = await self._client.select_input(input_num, zone)
                         return StatusCodes.OK if success else StatusCodes.SERVER_ERROR

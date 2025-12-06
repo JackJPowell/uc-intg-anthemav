@@ -35,17 +35,21 @@ class AnthemClient:
         self._listen_task: Optional[asyncio.Task] = None
         self._state_cache: Dict[str, Any] = {}
         self._zones_initialized = False
-        self._input_names_discovered = False
-        self._pending_input_queries = set()
+        self._input_count = 0
+        self._input_names: Dict[int, str] = {}
+        self._input_discovery_complete = False
         
-    async def connect(self, max_retries: int = 5, retry_delay: float = 2.0) -> bool:
-        async with self._lock:
-            if self._connected:
-                return True
-            
-            for attempt in range(1, max_retries + 1):
-                try:
-                    _LOG.info(f"Connecting to {self._device_config.name} at {self._device_config.ip_address}:{self._device_config.port} (attempt {attempt}/{max_retries})")
+    async def connect(self) -> bool:
+        max_retries = 3
+        retry_delay = 2.0
+        
+        for attempt in range(max_retries):
+            try:
+                async with self._lock:
+                    if self._connected:
+                        return True
+                    
+                    _LOG.info(f"Connecting to {self._device_config.name} at {self._device_config.ip_address}:{self._device_config.port} (attempt {attempt + 1}/{max_retries})")
                     
                     self._reader, self._writer = await asyncio.wait_for(
                         asyncio.open_connection(
@@ -59,7 +63,6 @@ class AnthemClient:
                     _LOG.info(f"Connected to {self._device_config.name}")
                     
                     self._listen_task = asyncio.create_task(self._listen())
-                    
                     await asyncio.sleep(0.1)
                     
                     _LOG.info(f"Listen task started for {self._device_config.name}")
@@ -67,34 +70,30 @@ class AnthemClient:
                     await self._send_command("ECH0")
                     await asyncio.sleep(0.05)
                     
-                    await self._discover_input_names()
+                    await self._send_command("ICN?")
+                    await asyncio.sleep(0.5)
                     
                     await self._send_command("Z1POW?")
                     
                     return True
                     
-                except asyncio.TimeoutError:
-                    _LOG.error(f"Connection timeout to {self._device_config.name} (attempt {attempt}/{max_retries})")
-                    if attempt < max_retries:
-                        await asyncio.sleep(retry_delay)
-                        continue
-                    return False
-                except OSError as e:
-                    if e.errno in (113, 111, 10061):
-                        _LOG.error(f"Network error connecting to {self._device_config.name}: {e} (attempt {attempt}/{max_retries})")
-                        if attempt < max_retries:
-                            await asyncio.sleep(retry_delay)
-                            continue
-                    _LOG.error(f"Connection error to {self._device_config.name}: {e}")
-                    return False
-                except Exception as e:
-                    _LOG.error(f"Unexpected connection error to {self._device_config.name}: {e}")
-                    if attempt < max_retries:
-                        await asyncio.sleep(retry_delay)
-                        continue
-                    return False
-            
-            return False
+            except asyncio.TimeoutError:
+                _LOG.error(f"Connection timeout to {self._device_config.name} (attempt {attempt + 1})")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2
+            except OSError as e:
+                _LOG.error(f"Network error connecting to {self._device_config.name}: {e} (attempt {attempt + 1})")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2
+            except Exception as e:
+                _LOG.error(f"Connection error to {self._device_config.name}: {e} (attempt {attempt + 1})")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2
+        
+        return False
     
     async def disconnect(self) -> None:
         async with self._lock:
@@ -139,32 +138,6 @@ class AnthemClient:
             self._connected = False
             return False
     
-    async def _discover_input_names(self) -> None:
-        _LOG.info(f"Discovering input names for {self._device_config.name}")
-        
-        if "input_names" not in self._state_cache:
-            self._state_cache["input_names"] = {}
-        
-        input_count = 15
-        
-        for input_num in range(1, input_count + 1):
-            self._pending_input_queries.add(input_num)
-            await self._send_command(f"ISN{input_num}?")
-            await asyncio.sleep(0.05)
-        
-        timeout = 3.0
-        start_time = asyncio.get_event_loop().time()
-        
-        while self._pending_input_queries and (asyncio.get_event_loop().time() - start_time) < timeout:
-            await asyncio.sleep(0.1)
-        
-        if self._pending_input_queries:
-            _LOG.warning(f"Input name discovery incomplete. Missing inputs: {self._pending_input_queries}")
-        else:
-            _LOG.info(f"Input name discovery completed for {self._device_config.name}")
-        
-        self._input_names_discovered = True
-    
     async def _listen(self) -> None:
         buffer = ""
         
@@ -180,23 +153,13 @@ class AnthemClient:
                     self._connected = False
                     break
                 
-                try:
-                    decoded = data.decode('ascii', errors='ignore')
-                except Exception as e:
-                    _LOG.debug(f"Decode error: {e}")
-                    continue
-                
+                decoded = data.decode('ascii', errors='ignore')
                 buffer += decoded
                 
                 while '\r' in buffer or '\n' in buffer:
-                    if '\r' in buffer and '\n' in buffer:
-                        if buffer.index('\r') < buffer.index('\n'):
-                            line, buffer = buffer.split('\r', 1)
-                        else:
-                            line, buffer = buffer.split('\n', 1)
-                    elif '\r' in buffer:
+                    if '\r' in buffer:
                         line, buffer = buffer.split('\r', 1)
-                    else:
+                    elif '\n' in buffer:
                         line, buffer = buffer.split('\n', 1)
                     
                     line = line.strip()
@@ -242,20 +205,24 @@ class AnthemClient:
             software = response[3:].strip()
             self._state_cache["software_version"] = software
         
-        elif response.startswith("ISN"):
-            match = re.match(r'ISN(\d+)"([^"]*)"', response)
-            if match:
-                input_num = int(match.group(1))
-                input_name = match.group(2).strip()
+        elif response.startswith("ICN"):
+            count_match = re.match(r'ICN(\d+)', response)
+            if count_match:
+                self._input_count = int(count_match.group(1))
+                _LOG.info(f"Input count: {self._input_count}")
+                asyncio.create_task(self._discover_input_names())
+        
+        elif response.startswith("ISN") and len(response) > 5:
+            input_match = re.match(r'ISN(\d{2})(.+)', response)
+            if input_match:
+                input_num = int(input_match.group(1))
+                input_name = input_match.group(2).strip()
+                self._input_names[input_num] = input_name
+                _LOG.info(f"Input {input_num} name: {input_name}")
                 
-                if "input_names" not in self._state_cache:
-                    self._state_cache["input_names"] = {}
-                
-                self._state_cache["input_names"][input_num] = input_name if input_name else f"Input {input_num}"
-                _LOG.info(f"Discovered input {input_num}: {input_name}")
-                
-                if input_num in self._pending_input_queries:
-                    self._pending_input_queries.remove(input_num)
+                if len(self._input_names) >= self._input_count:
+                    self._input_discovery_complete = True
+                    _LOG.info(f"Input name discovery complete: {len(self._input_names)} inputs discovered")
         
         elif response.startswith("Z"):
             zone_match = re.match(r'Z(\d+)', response)
@@ -285,6 +252,9 @@ class AnthemClient:
                     if inp_match:
                         input_num = int(inp_match.group(1))
                         self._state_cache[zone_key]["input"] = input_num
+                        
+                        if input_num in self._input_names:
+                            self._state_cache[zone_key]["input_name"] = self._input_names[input_num]
                 
                 elif "SIP" in response:
                     inp_match = re.search(r'SIP"([^"]*)"', response)
@@ -297,6 +267,24 @@ class AnthemClient:
                     if format_match:
                         audio_format = format_match.group(1)
                         self._state_cache[zone_key]["audio_format"] = audio_format
+    
+    async def _discover_input_names(self) -> None:
+        if self._input_count == 0:
+            _LOG.warning("Input count is 0, skipping input name discovery")
+            return
+        
+        _LOG.info(f"Starting input name discovery for {self._input_count} inputs")
+        
+        for input_num in range(1, self._input_count + 1):
+            await self._send_command(f"ISN{input_num:02d}")
+            await asyncio.sleep(0.1)
+        
+        await asyncio.sleep(1.0)
+        
+        if not self._input_discovery_complete:
+            missing_inputs = set(range(1, self._input_count + 1)) - set(self._input_names.keys())
+            if missing_inputs:
+                _LOG.warning(f"Input name discovery incomplete. Missing inputs: {missing_inputs}")
     
     def set_update_callback(self, callback: Callable[[str], None]) -> None:
         self._update_callback = callback
@@ -321,7 +309,11 @@ class AnthemClient:
         return await self._send_command(f"Z{zone}MUT{'1' if muted else '0'}")
     
     async def select_input(self, input_num: int, zone: int = 1) -> bool:
-        return await self._send_command(f"Z{zone}INP{input_num}")
+        success = await self._send_command(f"Z{zone}INP{input_num}")
+        if success:
+            await asyncio.sleep(0.1)
+            await self.query_input_name(zone)
+        return success
     
     async def query_power(self, zone: int = 1) -> bool:
         return await self._send_command(f"Z{zone}POW?")
@@ -335,6 +327,9 @@ class AnthemClient:
     async def query_input(self, zone: int = 1) -> bool:
         return await self._send_command(f"Z{zone}INP?")
     
+    async def query_input_name(self, zone: int = 1) -> bool:
+        return await self._send_command(f"Z{zone}SIP?")
+    
     async def query_model(self) -> bool:
         return await self._send_command("IDM?")
     
@@ -346,6 +341,8 @@ class AnthemClient:
         await self.query_mute(zone)
         await asyncio.sleep(0.1)
         await self.query_input(zone)
+        await asyncio.sleep(0.1)
+        await self.query_input_name(zone)
         return True
     
     def get_zone_state(self, zone: int) -> Dict[str, Any]:
@@ -359,12 +356,38 @@ class AnthemClient:
             return zone_data.get(key)
         return self._state_cache.get(key)
     
-    def get_input_names(self) -> Dict[int, str]:
-        return self._state_cache.get("input_names", {})
+    def get_input_list(self) -> list[str]:
+        if not self._input_names:
+            return [
+                "HDMI 1", "HDMI 2", "HDMI 3", "HDMI 4",
+                "HDMI 5", "HDMI 6", "HDMI 7", "HDMI 8",
+                "Analog 1", "Analog 2",
+                "Digital 1", "Digital 2",
+                "USB", "Network", "ARC"
+            ]
+        
+        input_list = []
+        for i in range(1, self._input_count + 1):
+            if i in self._input_names:
+                input_list.append(self._input_names[i])
+            else:
+                input_list.append(f"Input {i}")
+        
+        return input_list
     
-    def get_input_name(self, input_num: int) -> str:
-        input_names = self.get_input_names()
-        return input_names.get(input_num, f"Input {input_num}")
+    def get_input_number_by_name(self, name: str) -> Optional[int]:
+        for num, inp_name in self._input_names.items():
+            if inp_name == name:
+                return num
+        
+        default_map = {
+            "HDMI 1": 1, "HDMI 2": 2, "HDMI 3": 3, "HDMI 4": 4,
+            "HDMI 5": 5, "HDMI 6": 6, "HDMI 7": 7, "HDMI 8": 8,
+            "Analog 1": 9, "Analog 2": 10,
+            "Digital 1": 11, "Digital 2": 12,
+            "USB": 13, "Network": 14, "ARC": 15
+        }
+        return default_map.get(name)
     
     @property
     def is_connected(self) -> bool:
