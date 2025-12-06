@@ -65,12 +65,12 @@ class AnthemClient:
                     
                     self._listen_task = asyncio.create_task(self._listen())
                     
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.2)
                     
                     _LOG.info(f"Listen task started for {self._device_config.name}")
                     
                     await self._send_command("ECH0")
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(0.1)
                     await self._send_command("Z1POW?")
                     
                     return True
@@ -160,8 +160,16 @@ class AnthemClient:
                 
                 buffer += data.decode('ascii', errors='ignore')
                 
-                while '\r' in buffer:
-                    line, buffer = buffer.split('\r', 1)
+                while '\n' in buffer or '\r' in buffer:
+                    if '\r\n' in buffer:
+                        line, buffer = buffer.split('\r\n', 1)
+                    elif '\n' in buffer:
+                        line, buffer = buffer.split('\n', 1)
+                    elif '\r' in buffer:
+                        line, buffer = buffer.split('\r', 1)
+                    else:
+                        break
+                    
                     line = line.strip()
                     
                     if line:
@@ -283,6 +291,9 @@ class AnthemClient:
     async def query_input(self, zone: int = 1) -> bool:
         return await self._send_command(f"Z{zone}INP?")
     
+    async def query_input_name(self, zone: int = 1) -> bool:
+        return await self._send_command(f"Z{zone}SIP?")
+    
     async def query_model(self) -> bool:
         return await self._send_command("IDM?")
     
@@ -294,6 +305,8 @@ class AnthemClient:
         await self.query_mute(zone)
         await asyncio.sleep(0.1)
         await self.query_input(zone)
+        await asyncio.sleep(0.1)
+        await self.query_input_name(zone)
         return True
     
     def get_zone_state(self, zone: int) -> Dict[str, Any]:

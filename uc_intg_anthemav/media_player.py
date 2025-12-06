@@ -53,7 +53,7 @@ class AnthemMediaPlayer(MediaPlayer):
             "HDMI 5", "HDMI 6", "HDMI 7", "HDMI 8",
             "Analog 1", "Analog 2",
             "Digital 1", "Digital 2",
-            "USB", "Network", "ARC"
+            "USB", "Network", "ARC", "Analog 7.1"
         ]
         
         attributes = {
@@ -101,10 +101,10 @@ class AnthemMediaPlayer(MediaPlayer):
                 updated_attrs[Attributes.MUTED] = zone_state["muted"]
         
         if "input_name" in zone_state:
-            if self.attributes.get(Attributes.SOURCE) != zone_state["input_name"]:
-                updated_attrs[Attributes.SOURCE] = zone_state["input_name"]
-                if zone_state["input_name"]:
-                    updated_attrs[Attributes.MEDIA_TITLE] = zone_state["input_name"]
+            input_name = zone_state["input_name"]
+            if input_name and self.attributes.get(Attributes.SOURCE) != input_name:
+                updated_attrs[Attributes.SOURCE] = input_name
+                updated_attrs[Attributes.MEDIA_TITLE] = input_name
         
         if "audio_format" in zone_state:
             if zone_state["audio_format"]:
@@ -178,6 +178,9 @@ class AnthemMediaPlayer(MediaPlayer):
                     input_num = self._get_input_number(source_name)
                     if input_num is not None:
                         success = await self._client.select_input(input_num, zone)
+                        if success:
+                            await asyncio.sleep(0.2)
+                            await self._client.query_input_name(zone)
                         return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
                     return StatusCodes.BAD_REQUEST
                 return StatusCodes.BAD_REQUEST
@@ -206,7 +209,8 @@ class AnthemMediaPlayer(MediaPlayer):
             "Digital 2": 12,
             "USB": 13,
             "Network": 14,
-            "ARC": 15
+            "ARC": 15,
+            "Analog 7.1": 16
         }
         
         return input_map.get(source_name)
