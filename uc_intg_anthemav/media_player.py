@@ -5,11 +5,12 @@ Anthem Media Player entity implementation.
 :license: MPL-2.0, see LICENSE for more details.
 """
 
+import asyncio
 import logging
 from typing import Any, Dict, Optional
 
 from ucapi import StatusCodes
-from ucapi.media_player import Attributes, Commands, DeviceClasses, Features, MediaPlayer, States
+from ucapi.media_player import Attributes, Commands, DeviceClasses, Features, MediaPlayer, States, Options
 
 from uc_intg_anthemav.client import AnthemClient
 from uc_intg_anthemav.config import DeviceConfig, ZoneConfig
@@ -48,7 +49,13 @@ class AnthemMediaPlayer(MediaPlayer):
             Features.SELECT_SOURCE
         ]
         
-        source_list = self._client.get_input_list()
+        source_list = [
+            "HDMI 1", "HDMI 2", "HDMI 3", "HDMI 4",
+            "HDMI 5", "HDMI 6", "HDMI 7", "HDMI 8",
+            "Analog 1", "Analog 2",
+            "Digital 1", "Digital 2",
+            "USB", "Network", "ARC"
+        ]
         
         attributes = {
             Attributes.STATE: States.UNAVAILABLE,
@@ -58,6 +65,16 @@ class AnthemMediaPlayer(MediaPlayer):
             Attributes.SOURCE_LIST: source_list
         }
         
+        options = {
+            Options.SIMPLE_COMMANDS: [
+                Commands.ON,
+                Commands.OFF,
+                Commands.VOLUME_UP,
+                Commands.VOLUME_DOWN,
+                Commands.MUTE_TOGGLE
+            ]
+        }
+        
         super().__init__(
             entity_id,
             entity_name,
@@ -65,7 +82,8 @@ class AnthemMediaPlayer(MediaPlayer):
             attributes,
             device_class=DeviceClasses.RECEIVER,
             area=device_config.name if zone_config.zone_number > 1 else None,
-            cmd_handler=self.handle_command
+            cmd_handler=self.handle_command,
+            options=options
         )
         
         self._client.set_update_callback(self._on_device_update)
@@ -77,13 +95,15 @@ class AnthemMediaPlayer(MediaPlayer):
             self._update_attributes_from_state(zone_state)
         
         source_list = self._client.get_input_list()
-        if self.attributes.get(Attributes.SOURCE_LIST) != source_list:
+        current_source_list = self.attributes.get(Attributes.SOURCE_LIST, [])
+        if source_list != current_source_list:
             self.attributes[Attributes.SOURCE_LIST] = source_list
             if self._api and self._api.configured_entities.contains(self.id):
                 self._api.configured_entities.update_attributes(
                     self.id,
                     {Attributes.SOURCE_LIST: source_list}
                 )
+                _LOG.info(f"Updated source list with {len(source_list)} inputs")
     
     def _update_attributes_from_state(self, zone_state: Dict[str, Any]) -> None:
         updated_attrs = {}
@@ -194,6 +214,8 @@ class AnthemMediaPlayer(MediaPlayer):
             return StatusCodes.SERVER_ERROR
     
     async def push_update(self) -> None:
+        await self._client.query_input_count()
+        await asyncio.sleep(0.2)
         await self._client.query_all_status(self._zone_config.zone_number)
     
     @property

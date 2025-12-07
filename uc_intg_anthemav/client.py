@@ -197,13 +197,9 @@ class AnthemClient:
                 _LOG.debug(f"Current buffer: '{buffer}' (len={len(buffer)})")
                 
                 lines_processed = 0
-                while '\r' in buffer or '\n' in buffer:
-                    if '\r' in buffer:
-                        line, buffer = buffer.split('\r', 1)
-                        _LOG.debug(f"Split on \\r: line='{line}', remaining buffer='{buffer}'")
-                    elif '\n' in buffer:
-                        line, buffer = buffer.split('\n', 1)
-                        _LOG.debug(f"Split on \\n: line='{line}', remaining buffer='{buffer}'")
+                while ';' in buffer:
+                    line, buffer = buffer.split(';', 1)
+                    _LOG.debug(f"Split on semicolon: line='{line}', remaining buffer='{buffer}'")
                     
                     line = line.strip()
                     
@@ -395,6 +391,9 @@ class AnthemClient:
     
     async def query_model(self) -> bool:
         return await self._send_command("IDM?")
+    
+    async def query_input_count(self) -> bool:
+        return await self._send_command("ICN?")
     
     async def query_all_status(self, zone: int = 1) -> bool:
         await self.query_power(zone)
