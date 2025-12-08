@@ -82,6 +82,10 @@ class AnthemClient:
                     await self._send_command("ECH0")
                     await asyncio.sleep(0.1)
                     
+                    await self._send_command("SIP1")
+                    _LOG.info("Enabled Standby IP Control (SIP1) - device will respond to IP commands in standby")
+                    await asyncio.sleep(0.1)
+                    
                     await self._send_command("ICN?")
                     await asyncio.sleep(0.2)
                     
@@ -277,6 +281,14 @@ class AnthemClient:
                     self._input_discovery_complete = True
                     _LOG.info(f"Input name discovery complete: {len(self._input_names)} inputs discovered")
         
+        elif response.startswith("SIP"):
+            sip_value = response[3:].strip()
+            if sip_value == "1":
+                _LOG.info("Standby IP Control confirmed ENABLED")
+            elif sip_value == "0":
+                _LOG.warning("Standby IP Control is DISABLED - re-enabling...")
+                asyncio.create_task(self._send_command("SIP1"))
+        
         elif response.startswith("Z"):
             zone_match = re.match(r'Z(\d+)', response)
             if zone_match:
@@ -391,9 +403,6 @@ class AnthemClient:
     
     async def query_model(self) -> bool:
         return await self._send_command("IDM?")
-    
-    async def query_input_count(self) -> bool:
-        return await self._send_command("ICN?")
     
     async def query_all_status(self, zone: int = 1) -> bool:
         await self.query_power(zone)
